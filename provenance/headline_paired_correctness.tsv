@@ -1,0 +1,2 @@
+samples	both_correct	both_incorrect	adaptive_only_correct	baseline_only_correct	discordances	exact_mcnemar_p
+384	270	110	3	1	4	0.625

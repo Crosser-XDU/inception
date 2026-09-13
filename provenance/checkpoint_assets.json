@@ -1,0 +1,81 @@
+{
+  "python": "3.11.15 (main, Mar 11 2026, 17:20:07) [GCC 14.3.0]",
+  "packaging": "25.0",
+  "checkpoint": "/data/home/zhuangz/workplace/2026new/MetaMathQA/recurft_math_exp/outputs/llama3_q3_stage1_boundary_only_continue_to_1000_20260711/checkpoint-60375",
+  "files": [
+    {
+      "name": "adapter_config.json",
+      "bytes": 19634,
+      "sha256": "2f2eb8b3b95d7bacfbb2abb50d1ddc53c8448a573fa22d1f3ed1c97a8c8d22e1"
+    },
+    {
+      "name": "adapter_model.safetensors",
+      "bytes": 83945296,
+      "sha256": "ec8a5c1e5bff0048887418c1fec825cc5c4abd6e230c4c3df1e33e170a2b20bb"
+    },
+    {
+      "name": "recurft_config.json",
+      "bytes": 666,
+      "sha256": "dff9b1098a201a330d96382bfb3421f7c5e65240e569c114ec076b408849bdbd"
+    },
+    {
+      "name": "recurft_recurrent.safetensors",
+      "bytes": 60890250,
+      "sha256": "5e7a2ad83faf67647863ed0e1820305d65e179d090e9e3da0e24f0d5047cc52d"
+    },
+    {
+      "name": "tokenizer.json",
+      "bytes": 17210148,
+      "sha256": "8c1dcab308e7cf5970ea38815e0a62887d705c5b436f869ca27a5dcdd40c36a6"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "bytes": 50912,
+      "sha256": "8ccffb021982744f0176ccfe94e4350abc1aa3e623cf0569c8d113c63c2f54bf"
+    },
+    {
+      "name": "special_tokens_map.json",
+      "bytes": 506,
+      "sha256": "994823bd9d0de3b2f59f09f6502a65a228954ca8e5b711534988deb083c37449"
+    },
+    {
+      "name": "chat_template.jinja",
+      "bytes": 389,
+      "sha256": "ba03a121d097859c7b5b9cd03af99aafe95275210d2876f642ad9929a150f122"
+    }
+  ],
+  "metadata": {
+    "anchor_layer": 28,
+    "boundary_head_rank": 256,
+    "last_layer": 31,
+    "last_lora_alpha": 16,
+    "last_lora_rank": 8,
+    "layers_path": "model.layers",
+    "loop_end_layer": 30,
+    "loop_layer_ids": [
+      29,
+      30
+    ],
+    "loop_start_layer": 29,
+    "lora_target": [
+      "all"
+    ],
+    "pre_lora_alpha": 16,
+    "pre_lora_rank": 8,
+    "projection_layer_ids": [
+      29,
+      30,
+      31
+    ],
+    "recurrent_hidden_state_index": 29,
+    "t_lora_alpha": 256,
+    "t_lora_rank": 128,
+    "tail_layer_ids": null,
+    "tail_layer_start": null,
+    "tail_layers": null,
+    "token_conditioning_rank": 0,
+    "verifier_lora_alpha": 64,
+    "verifier_lora_rank": 32,
+    "verifier_probe_init_std": 0.02
+  }
+}

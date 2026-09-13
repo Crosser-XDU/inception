@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO=/data/home/zhuangz/workplace/2027new/LLaMA-Factory
+EXP=/data/home/zhuangz/workplace/2026new/MetaMathQA/recurft_math_exp
+ENV=/data/home/zhuangz/workplace/2026new/OTV/.mamba_root/envs/otv311
+MODEL=/data/pretrained_model/huggingface_model/meta-llama/Meta-Llama-3-8B-Instruct
+CHECKPOINT=${EXP}/outputs/llama3_q3_stage1_boundary_only_continue_to_1000_20260711/checkpoint-60375
+DATA=${EXP}/data/gsm8k_test_full_1319.jsonl
+OUT=${EXP}/evals/stage1_boundary_long256_n384_repeat_20260712
+PID_FILE=${EXP}/pids/stage1_boundary_long256_n384_repeat_gpu3_20260712.pid
+
+mkdir -p "${OUT}" "${EXP}/logs" "${EXP}/pids"
+echo $$ > "${PID_FILE}"
+cd "${REPO}"
+
+export CUDA_VISIBLE_DEVICES=3
+export PYTHONPATH="${REPO}/src:${REPO}/experiments/recurft_math:${PYTHONPATH:-}"
+export DISABLE_VERSION_CHECK=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+for repeat in 1 2; do
+  output=${OUT}/q3_boundary_only_1000_default_repeat${repeat}_n384x256.json
+  log=${EXP}/logs/q3_boundary_only_1000_default_repeat${repeat}_n384x256_gpu3_20260712.log
+  if [[ -s "${output}" ]]; then
+    printf '[%s] repeat %s already exists: %s\n' "$(date -Is)" "${repeat}" "${output}"
+    continue
+  fi
+
+  printf '[%s] starting 384-prompt long-output repeat %s\n' "$(date -Is)" "${repeat}"
+  "${ENV}/bin/python" experiments/recurft_math/recurft_speculative_generate.py \
+    --model-name-or-path "${MODEL}" \
+    --checkpoint "${CHECKPOINT}" \
+    --data-file "${DATA}" \
+    --output-json "${output}" \
+    --mode fixed \
+    --draft-commit-policy target_match \
+    --target-match-lambda 1.0 \
+    --start-index 8 \
+    --max-samples 384 \
+    --max-new-tokens 256 \
+    --max-prompt-tokens 1024 \
+    --max-block-tokens 3 \
+    --min-block-tokens 1 \
+    --short-block 3 \
+    --medium-block 3 \
+    --long-block 3 \
+    --medium-position 96 \
+    --long-position 192 \
+    --draft-logit-source boundary \
+    --dtype fp16 \
+    --disable-thinking >"${log}" 2>&1
+  printf '[%s] completed 384-prompt long-output repeat %s\n' "$(date -Is)" "${repeat}"
+done
+
