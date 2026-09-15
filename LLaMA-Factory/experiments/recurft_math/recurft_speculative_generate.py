@@ -1089,7 +1089,8 @@ def score_response(
 
     if metric == "math":
         prediction = normalize_answer(extract_answer(text))
-        reference = normalize_answer(references[0])
+        # Official GSM8K answers contain a rationale followed by "#### <answer>".
+        reference = normalize_answer(references[0].rsplit("####", 1)[-1])
         return prediction, reference, float(prediction == reference)
 
     scores = [rouge_l_f1(text, reference) for reference in references]

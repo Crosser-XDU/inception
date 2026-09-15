@@ -21,6 +21,7 @@ LLaMA-Factory/src/                         完整框架源代码，含模型、L
 LLaMA-Factory/experiments/recurft_math/    解码、rollout、数值审计及其直接依赖
 LLaMA-Factory/tests/                      递归、损失、冻结参考与草稿相关单元测试
 scripts/run_decode.py                    安全检查 + 显式路由 + 结果审计
+scripts/benchmark_decode.sh              集中改参数、检查训练步数、重复测速并生成耗时简报
 scripts/reproduce_headline.sh             N=384 / 两遍 / FP16 / K=3 协议入口
 scripts/train.py                         四阶段训练入口，生成路径可移植的 YAML
 scripts/self_test.py                     离线 CPU 单元与真实小模型端到端测试
@@ -87,6 +88,27 @@ source scripts/server_paths.example.sh
 
 GPU 入口要求空闲显存至少 51200 MiB、util <= 20、无 compute PID（包括未澄清的驱动残留 PID）。使用同用户/设备协作锁防止本包重复启动；不杀任何外部进程。运行中每五秒采样，外部重叠或监控失败标为 provisional。`sampled_exclusive` 仅表示采样时未见重叠，不是连续独占或正式 clean wall 的证明。
 
+## 自定义 checkpoint 测速
+
+在 Linux GPU 节点修改 `scripts/benchmark_decode.sh` 开头的参数，至少填写 `MODEL`、`CHECKPOINT`、`GPU`，并将 `DATA` 指向已有的 GSM8K 测试 JSONL。也可以通过环境变量覆盖参数：
+
+```bash
+export MODEL=/path/to/Meta-Llama-3-8B-Instruct
+export CHECKPOINT=/path/to/checkpoint-xxxxx
+export GPU=GPU-your-allocated-device-uuid
+export DATA=/path/to/gsm8k_test.jsonl
+bash scripts/benchmark_decode.sh --dry-run
+bash scripts/benchmark_decode.sh
+# 增加题数、比较单枚草稿，重复两遍：
+SAMPLES=128 BLOCK=2 REPEATS=2 bash scripts/benchmark_decode.sh
+```
+
+默认参数为 `ROUTE=auto`、`SAMPLES=32`、`MAX_NEW_TOKENS=256`、`BLOCK=3`、`DTYPE=bf16`、`REPEATS=1`。`BLOCK=3` 为一枚目标模型已确定的 token 加最多两枚草稿。`auto` 根据 `boundary_head_rank` 选择 `boundary` 或 `tail`；头部配置存在不代表已经充分训练。core / multistep 权重通常使用 `tail`，完成头部训练后可显式设置 `ROUTE=boundary`。启动前打印 checkpoint 的累计 `global_step`；没有 `trainer_state.json` 的推理权重仍可评测，但无法从该文件确认步数。
+
+默认优先使用项目 `.venv/bin/python`，其次使用当前环境的 Python；可显式设置 `PYTHON`。`OUT` 留空时自动生成实验目录，每次重复写入 `repeatN` 子目录；已有 `OUT` 会被拒绝。结果包括原有 `result.json`、`run.log` 和新增的 `timing_summary.txt`，简报打印速度、输出长度、草稿接受率、输出一致率和降序排列的分项耗时。每遍都比较同一 checkpoint 的 greedy 与投机解码，保持严格 target-match、n-gram off 和已有 GPU 检查。使用默认诊断计时，包含 prefill 和生成，不包含模型加载；该便捷入口不等同于下面的历史 N=384 协议。
+
+`--dry-run` 只做文件和参数预检，不下载资产、不占用 GPU，也不创建输出目录。该脚本尚未在用户集群上完成 GPU 测速。
+
 ## N=384 受控协议
 
 ```bash
@@ -121,8 +143,48 @@ python3 scripts/train.py --stage boundary --model /path/to/base \
 
 历史晚层链：core 49375 步 -> multistep 59375 -> boundary warmup 59600 -> boundary 60375。core 配置来自此前基于保存参数重建的补充材料，非原始 YAML 字节副本；另三个配置直接保留当前工作区历史文件。默认仅适用于该 Llama-3-8B 晚层链，其他模型须重新确定层索引、模板、adapter 与 checkpoint。
 
+## T 与 boundary 联合训练（实验阶段）
+
+`joint` 从已有 boundary checkpoint 继续，冻结目标模型及其 LoRA，开放 recurrent 模块中原本可训练的参数（默认架构为 T LoRA 和 boundary 头）。两步 rollout 使用预测 hidden；`detach_rollout: false` 让第二步损失也能沿状态路径反向更新第一步。当前配方是待验证的实验起点，不代表已经提高接受率或达到某个加速倍率。
+
+配置位于 `configs/experimental/recurft_joint_boundary.yaml`。它叠加在该 checkpoint 对应的 `train.yaml` 上，保留模型结构参数，并检查循环层、T rank、boundary rank 与 checkpoint 元数据是否相符。只支持带 `trainer_state.json`、不含旧 optimizer/scheduler 状态的 checkpoint；历史 `save_only_model: true` 保存格式符合要求。原 checkpoint 保留，新阶段重新建立优化器；`--steps` 表示新增优化器更新次数，预热起点自动设为加载权重的 global_step。
+
+```bash
+MODEL=/path/to/Qwen3-8B
+DATA=/path/to/MetaMathQA-395K.json
+CKPT=/path/to/boundary_run/checkpoint_output/checkpoint-60375
+SOURCE_CONFIG=/path/to/boundary_run/train.yaml
+
+python scripts/train.py --stage joint \
+  --model "$MODEL" --data "$DATA" --checkpoint "$CKPT" \
+  --source-config "$SOURCE_CONFIG" --template qwen3_nothink \
+  --output runs/joint_trial --gpu 0 --steps 2000 --dry-run
+# 检查输出的 YAML 后，移除 --dry-run 执行。
+```
+
+Qwen3 非思考模式使用 `qwen3_nothink`；入口会拒绝 Qwen3 搭配 `llama3`。已使用错误模板训练的权重并不会因为改了模板就恢复，需要在新模板下重新检查目标模型质量与草稿匹配率。不要在联合阶段更换基座模型。
+
+如果现有权重只有 core/multistep、`boundary_head_rank: 0`，先运行头部预热。以下示例适用于当前 29–30 层、pre/post rank 8、T rank 128 的配置；其他结构需先匹配对应配方：
+
+```bash
+python scripts/train.py --stage boundary-warmup \
+  --model "$MODEL" --data "$DATA" --checkpoint /path/to/core_checkpoint \
+  --template qwen3_nothink --output runs/head_warmup --gpu 0 --steps 225 --dry-run
+# 完成实际预热后，joint 的 --checkpoint 和 --source-config
+# 分别指向此次预热保存的 checkpoint 和 runs/head_warmup/train.yaml。
+```
+
+联合阶段的监督来自同一训练文本前缀下、固定的适配后目标模型分布。当前默认不启用数据标签 CE，优先用 KL 训练草稿匹配目标模型；这仍是基于训练文本的 hidden rollout 蒸馏，不等于完整的模型生成轨迹训练，也没有直接优化两枚 token 的联合接受事件。
+
+关键参数：`recurft_stage1_heads_only: false`、`recurft_recurrent_trainable_only: true`、`recurft_multistep_steps: 2`、`recurft_multistep_detach_rollout: false`。`recurft_multistep_loss_weight: 0.1` 会乘到 rollout 内所有损失上，因此 boundary KL 内部权重设为 `10.0`，预热后的有效权重为 `1.0`；基础 rollout hidden 损失权重为 `0.1`。单步 recurrent 权重也保留 `0.1`：当前实现用它作为整个 recurrent/rollout 分支的入口，不能直接设零。两项普通 boundary CE/KL 设零，以免混入真实 hidden 上的旧头部训练目标。
+
+先观察 `recurft_multistep_boundary_teacher_top1_k1`、`..._k2`、`recurft_multistep_boundary_logit_kl_k1`、`..._k2`。这些是训练前缀上的分步指标，不是在线两步连续接受率。每个候选 checkpoint 仍应使用 `ROUTE=boundary` 在独立验证集上测接受率、输出差异、任务质量和 wall speed；最终评测集不要用于反复选择超参数。2000 步只是首轮实验长度，不保证训练充分。
+
+此入口已通过 11 项配置/实际 CLI dry-run 检查，未在集群执行联合训练，也未重新运行完整 ML 梯度测试。原四阶段配置保留，旧 CPU 测试报告不代表这项新实验已经验证。
+
 ## 验证范围
 
 本次实际通过 87 项单元/参数化测试，以及 boundary、tail、ngram 三条 CPU 小模型端到端解码；完整框架源码已成功构建 wheel。真实 checkpoint 的 8 个推理文件哈希、GSM8K 的 384 样本输入覆盖、训练入口 dry-run 均已检查。
 
 `provenance/cpu_test_report.json` 记录测试结果、环境版本和对应代码 SHA256，导出器拒绝把报告绑定到修改后的代码。该测试不是全量 8B 训练/评测，也没有重新测量论文 wall。没有在全新机器上重装并验证整套 CUDA 依赖；下载与安装仍取决于网络、wheel 可用性和 NVIDIA 驱动。本包保留上游 Apache-2.0 LICENSE；个人路径与历史审计存在于 provenance，此包是研究代码交付，不是匿名投稿附件。
+2026-09-14 评分修复：数学评分现在从官方 GSM8K 原始 `answer` 的 `####` 后提取标准答案，仍兼容已经只保留最终答案的数据。修复前直接使用官方原始 JSONL 会把完整推导当作标准答案，从而错误判零；这个问题不影响已记录的生成 token 或耗时。修复通过 5 项独立评分回归检查（`python tests/test_math_scoring.py`），未重新执行 GPU 实验。上面的历史 CPU 报告仍绑定导出时的代码快照，不代表已验证本次修改后的全部模型路径。
