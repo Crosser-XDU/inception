@@ -20,6 +20,7 @@ REPEATS="${REPEATS:-1}"                        # 同一批题目重复几遍
 THINKING="${THINKING:-0}"                      # 0 / 1
 DRY_RUN="${DRY_RUN:-0}"                        # 1 只预检
 PYTHON="${PYTHON:-}"                           # 留空优先使用 .venv/bin/python
+CORRECTION_MODE="${CORRECTION_MODE:-off}"       # off / reuse / defer
 OUT="${OUT:-}"                                # 留空自动生成；须是新目录
 # ==================================================
 
@@ -67,6 +68,7 @@ fi
 [[ -f "$DATA" ]] || fail "找不到评测 JSONL：$DATA；请准备含 question 和 answer 的数据文件。"
 case "$ROUTE" in auto|tail|boundary) ;; *) fail 'ROUTE 必须是 auto、tail 或 boundary。' ;; esac
 case "$DTYPE" in bf16|fp16|fp32) ;; *) fail 'DTYPE 必须是 bf16、fp16 或 fp32。' ;; esac
+case "$CORRECTION_MODE" in off|reuse|defer) ;; *) fail 'CORRECTION_MODE 必须是 off、reuse 或 defer。' ;; esac
 for name in SAMPLES MAX_NEW_TOKENS MAX_PROMPT_TOKENS BLOCK REPEATS; do
   [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || fail "$name 必须是正整数。"
 done
@@ -106,6 +108,8 @@ OUT="${OUT:-$REPO_ROOT/runs/timing_${ROUTE}_$(date +%Y%m%d_%H%M%S)_$$}"
 printf 'Python: %s\nGPU: %s\nRoute: %s\nSamples: %s\n输出目录: %s\n' \
   "$PYTHON" "$GPU" "$ROUTE" "$SAMPLES" "$OUT"
 
+printf 'Correction mode: %s\n' "$CORRECTION_MODE"
+
 for ((repeat = 1; repeat <= REPEATS; repeat++)); do
   run_dir="$OUT/repeat$repeat"
   cmd=("$PYTHON" "$REPO_ROOT/scripts/run_decode.py"
@@ -113,7 +117,7 @@ for ((repeat = 1; repeat <= REPEATS; repeat++)); do
     --output "$run_dir" --gpu "$GPU" --route "$ROUTE"
     --samples "$SAMPLES" --start "$START"
     --max-new-tokens "$MAX_NEW_TOKENS" --max-prompt-tokens "$MAX_PROMPT_TOKENS"
-    --block "$BLOCK" --dtype "$DTYPE")
+    --block "$BLOCK" --dtype "$DTYPE" --correction-mode "$CORRECTION_MODE")
   if [[ "$THINKING" == 1 ]]; then cmd+=(--thinking); fi
   if [[ "$DRY_RUN" == 1 ]]; then cmd+=(--dry-run); fi
   printf '\n第 %s/%s 次；日志：%s/run.log\n' "$repeat" "$REPEATS" "$run_dir"
@@ -152,8 +156,12 @@ fields = [
     ("baseline_accuracy", "Greedy 答题准确率（0～1）"),
     ("accuracy", "投机答题准确率（0～1）"),
     ("component_timing_mode", "分项计时方式"),
+    ("fast_correction_cache_reuses", "验证缓存复用次数"),
+    ("deferred_corrective_tokens", "延迟纠正次数"),
 ]
-lines = ["测速结果"]
+lines = ["测速结果", f"纠正模式: {marker.get('correction_mode', 'off')}"]
+if marker.get("correction_mode", "off") != "off" and not marker.get("correction_optimization_observed"):
+    lines.append("优化开关已开启，但本次未触发对应纠正分支；不能据此判断优化收益。")
 for key, label in fields:
     value = s.get(key)
     value = f"{value:.6f}" if isinstance(value, float) else str(value)

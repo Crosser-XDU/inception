@@ -109,6 +109,33 @@ SAMPLES=128 BLOCK=2 REPEATS=2 bash scripts/benchmark_decode.sh
 
 `--dry-run` 只做文件和参数预检，不下载资产、不占用 GPU，也不创建输出目录。该脚本尚未在用户集群上完成 GPU 测速。
 
+## 启用缓存优化的测速
+
+新入口 `scripts/benchmark_decode_cache.sh` 默认启用 `CORRECTION_MODE=reuse`，支持已有 core/multistep 的 tail 路线和带头部 checkpoint 的 boundary 路线，不需要为缓存优化重新训练。填写脚本顶部的 `MODEL`、`CHECKPOINT`，确认数据和分配的 GPU；其他参数也可用同名环境变量覆盖。
+
+```bash
+export MODEL=/path/to/Qwen3-8B
+export CHECKPOINT=/path/to/checkpoint-xxxxx
+export DATA=/path/to/gsm8k_test.jsonl
+export GPU=0
+bash scripts/benchmark_decode_cache.sh --dry-run
+bash scripts/benchmark_decode_cache.sh
+
+# 分别测试延迟纠正和原路径，保持模型、样本、长度等条件一致：
+CORRECTION_MODE=defer bash scripts/benchmark_decode_cache.sh
+CORRECTION_MODE=off bash scripts/benchmark_decode_cache.sh
+```
+
+- `reuse`：传递 `--reuse-verify-cache-for-correction`，保留验证阶段的前缀 KV，只运行纠正 token。
+- `defer`：仅传递 `--defer-correction-to-next-verify`，保留验证前缀并将纠正 token 留到下一轮验证，避免额外的独立纠正前向。
+- `off`：不传递上述两个开关，使用原纠正路径。原 `benchmark_decode.sh` 默认仍为 `off`。
+
+三种模式互斥，默认一次只跑所选模式。`ROUTE=auto` 按头部配置选择 tail/boundary；默认 32 题、block 3、BF16、重复 1 遍。继续使用严格 target-match、n-gram off、相同 checkpoint 的 greedy 基线、原 GPU 检查和同步分项计时，不混入其他运行优化。自动输出目录包含纠正模式；显式 `OUT` 必须为新目录。
+
+`timing_summary.txt` 增加纠正模式、`fast_correction_cache_reuses`（缓存复用次数）和 `deferred_corrective_tokens`（延迟纠正次数）。`inputs.json` 和 `complete.marker.json` 保存模式；原始 `result.json` 的 `summary.args` 保存实际开关。入口会核对开关及每条样本的计数之和；`correction_optimization_observed: false` 表示开关配置正确但本次没有触发相应分支，不代表已经获得优化收益。
+
+可直接使用底层包装器，例如 `python scripts/run_decode.py ... --correction-mode reuse`。新脚本依赖更新后的 `benchmark_decode.sh`、`run_decode.py` 和 `common.py`，同步时应拉取整个提交。缓存路径改变可能影响浮点计算结果；比较速度时继续检查输出一致性和任务质量。12 项新增测试覆盖开关传递、计数检查，以及真实 Bash 到解码命令的 dry-run；未在用户集群验证 GPU 性能或数值等价性。
+
 ## N=384 受控协议
 
 ```bash

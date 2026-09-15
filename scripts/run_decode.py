@@ -25,6 +25,13 @@ def command(args):
            "--device", args.device, "--question-prefix", "Solve the following math problem step by step.",
            "--question-suffix", "Put the final answer on its own line after 'Answer:'.",
            "--enable-thinking" if args.thinking else "--disable-thinking"]
+    correction_mode = getattr(args, "correction_mode", "off")
+    if correction_mode == "reuse":
+        cmd.append("--reuse-verify-cache-for-correction")
+    elif correction_mode == "defer":
+        cmd.append("--defer-correction-to-next-verify")
+    elif correction_mode != "off":
+        raise ValueError(f"Unknown correction mode: {correction_mode}")
     return cmd
 
 
@@ -41,6 +48,8 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--max-prompt-tokens", type=int, default=1024)
     p.add_argument("--block", type=int, default=3)
+    p.add_argument("--correction-mode", choices=["off", "reuse", "defer"], default="off",
+                   help="Reuse verified KV, defer correction to the next verification, or keep the original path.")
     p.add_argument("--thinking", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="Validate assets and print command; do not launch a model.")
     args = p.parse_args()
@@ -66,7 +75,8 @@ def main():
                ("model", "checkpoint", "data", "output")}, "data": coverage, "checkpoint": metadata})
     try:
         gpu = run_logged(cmd, args.output, args.gpu)
-        audit = audit_result(args.output / "result.json", args.route, args.start, args.samples)
+        audit = audit_result(args.output / "result.json", args.route, args.start, args.samples,
+                             correction_mode=args.correction_mode)
         audit["timing_status"] = gpu["timing_status"]
         write_json(args.output / "complete.marker.json", audit)
         print(json.dumps(audit, indent=2))

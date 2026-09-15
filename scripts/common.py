@@ -96,7 +96,32 @@ def check_finite(value):
             check_finite(child)
 
 
-def audit_result(path, route, start, samples):
+def audit_correction_mode(summary, rows, mode):
+    """Check requested switches and execution counters without claiming a speedup."""
+    expected = {"off": (False, False), "reuse": (True, False), "defer": (False, True)}
+    if mode not in expected:
+        raise ValueError(f"Unknown correction mode: {mode}")
+    switches = ("reuse_verify_cache_for_correction", "defer_correction_to_next_verify")
+    for name, enabled in zip(switches, expected[mode]):
+        if summary["args"].get(name, False) is not enabled:
+            raise ValueError(f"Correction mode {mode} does not match result flag {name}.")
+    counters = {}
+    for name in ("fast_correction_cache_reuses", "deferred_corrective_tokens"):
+        value = summary.get(name)
+        per_sample = [row["adaptive"].get(name) for row in rows]
+        if any(type(item) is not int or item < 0 for item in [value, *per_sample]):
+            raise ValueError(f"Missing or invalid correction counter: {name}")
+        if sum(per_sample) != value:
+            raise ValueError(f"Correction counter does not match per-sample totals: {name}")
+        counters[name] = value
+    reuse = counters["fast_correction_cache_reuses"]
+    deferred = counters["deferred_corrective_tokens"]
+    if (mode != "reuse" and reuse) or (mode != "defer" and deferred):
+        raise ValueError("An unrequested correction branch executed.")
+    return {"correction_mode": mode, "correction_optimization_observed": bool(reuse or deferred), **counters}
+
+
+def audit_result(path, route, start, samples, correction_mode=None):
     data = json.loads(Path(path).read_text())
     check_finite(data)
     s, rows = data["summary"], data["results"]
@@ -126,7 +151,8 @@ def audit_result(path, route, start, samples):
             raise ValueError("No evidence that recurrent drafting actually ran.")
         if times.get(route + "_s", 0) <= 0 or times.get(other, 0) != 0:
             raise ValueError("Projection timing does not match the selected route.")
-    return {"route": route, "samples": samples, "result_sha256": sha256(path),
+    correction = audit_correction_mode(s, rows, correction_mode) if correction_mode is not None else {}
+    return {**correction, "route": route, "samples": samples, "result_sha256": sha256(path),
             "wall_speedup": s["wall_clock_speedup"], "target_call_speedup": s["target_call_speedup"],
             "baseline_correct": sum(r["baseline_correct"] is True for r in rows),
             "recurrent_correct": sum(r["correct"] is True for r in rows),
