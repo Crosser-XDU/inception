@@ -121,7 +121,78 @@ def audit_correction_mode(summary, rows, mode):
     return {"correction_mode": mode, "correction_optimization_observed": bool(reuse or deferred), **counters}
 
 
-def audit_result(path, route, start, samples, correction_mode=None):
+def audit_draft_policy(summary, rows, expected):
+    """Confirm the policy and aggregate blocks; gate and cooldown skips may overlap."""
+    for key, value in expected.items():
+        if summary["args"].get(key) != value:
+            raise ValueError(f"Draft policy does not match result flag {key}.")
+    histogram = {}
+    for row in rows:
+        hist = row["adaptive"].get("block_hist")
+        if not isinstance(hist, dict):
+            raise ValueError("Missing block_hist; update the decoder to report adaptive execution.")
+        for length, count in hist.items():
+            if not str(length).isdigit() or int(length) < 1 or type(count) is not int or count < 0:
+                raise ValueError("Invalid draft block histogram.")
+            histogram[str(int(length))] = histogram.get(str(int(length)), 0) + count
+    blocks = sum(histogram.values())
+    target_only = histogram.get("1", 0)
+    draft_blocks = blocks - target_only
+    drafts = sum((int(length) - 1) * count for length, count in histogram.items())
+    if drafts != summary["draft_tokens"]:
+        raise ValueError("Draft block histogram does not match draft_tokens.")
+    accepted = summary["accepted_draft_tokens"]
+    if type(accepted) is not int or not 0 <= accepted <= drafts:
+        raise ValueError("Invalid accepted draft count.")
+    counters = {}
+    for key in ("cheap_policy_evaluations", "cheap_policy_skips",
+                "draft_cooldown_skips", "draft_cooldown_activations"):
+        counts = [summary.get(key), *(row["adaptive"].get(key) for row in rows)]
+        if any(type(n) is not int or n < 0 for n in counts) or counts[0] != sum(counts[1:]):
+            raise ValueError(f"Missing or inconsistent adaptive counter: {key}")
+        counters[key] = counts[0]
+    if counters["cheap_policy_skips"] > counters["cheap_policy_evaluations"]:
+        raise ValueError("Gate skips exceed gate evaluations.")
+    phase_stats = {}
+    for phase in ("early", "mid", "late"):
+        phase_blocks = phase_drafted_blocks = phase_drafts = phase_accepted = reaching_samples = 0
+        for row in rows:
+            a = row["adaptive"]
+            hist = a.get("block_hist_by_phase", {}).get(phase, {})
+            accepted_hist = a.get("accepted_hist_by_phase", {}).get(phase, {})
+            n = sum(hist.values())
+            phase_blocks += n
+            reaching_samples += int(n > 0)
+            phase_drafted_blocks += sum(count for length, count in hist.items() if int(length) > 1)
+            phase_drafts += sum((int(length) - 1) * count for length, count in hist.items())
+            phase_accepted += sum(max(0, int(length) - 1) * count for length, count in accepted_hist.items())
+        if phase_blocks:
+            phase_stats[phase] = {
+                "reaching_samples": reaching_samples, "blocks": phase_blocks,
+                "draft_tokens": phase_drafts, "accepted_draft_tokens": phase_accepted,
+                "draft_acceptance": phase_accepted / phase_drafts if phase_drafts else None,
+                "mean_accepted_drafts_per_draft_block": (
+                    phase_accepted / phase_drafted_blocks if phase_drafted_blocks else None),
+            }
+    return {
+        "phase_draft_stats": phase_stats,
+        "draft_policy": "adaptive" if expected["mode"] == "heuristic" else expected["mode"],
+        "runtime_mode": "throughput" if expected.get("production_async_timing") else "diagnostic",
+        "draft_policy_settings": expected,
+        "recurrent_drafting_observed": drafts > 0,
+        "verified_blocks": blocks,
+        "draft_blocks": draft_blocks,
+        "target_only_blocks": target_only,
+        "target_only_block_rate": target_only / blocks if blocks else None,
+        "mean_drafts_per_draft_block": drafts / draft_blocks if draft_blocks else None,
+        "mean_accepted_drafts_per_draft_block": accepted / draft_blocks if draft_blocks else None,
+        "mean_accepted_drafts_per_block": accepted / blocks if blocks else None,
+        "draft_block_histogram": dict(sorted(histogram.items(), key=lambda item: int(item[0]))),
+        **counters,
+    }
+
+
+def audit_result(path, route, start, samples, correction_mode=None, draft_policy=None):
     data = json.loads(Path(path).read_text())
     check_finite(data)
     s, rows = data["summary"], data["results"]
@@ -137,6 +208,7 @@ def audit_result(path, route, start, samples, correction_mode=None):
             raise ValueError(f"Missing safety counter: {key}")
         if s[key] != 0 or any(r["adaptive"][key] != 0 for r in rows):
             raise ValueError(f"Unsafe committed token count: {key}")
+    policy = audit_draft_policy(s, rows, draft_policy) if draft_policy is not None else {}
     drafts, ngrams = s["draft_tokens"], s.get("ngram_draft_tokens", 0)
     if route == "ngram":
         if args.get("ngram_draft_mode") != "only" or drafts != ngrams:
@@ -147,12 +219,22 @@ def audit_result(path, route, start, samples, correction_mode=None):
         if args.get("ngram_draft_mode") != "off" or args["draft_logit_source"] != route:
             raise ValueError("Requested neural draft route was overridden.")
         other = "tail_s" if route == "boundary" else "boundary_s"
-        if drafts <= 0 or ngrams != 0 or times.get("t_step_s", 0) <= 0:
-            raise ValueError("No evidence that recurrent drafting actually ran.")
-        if times.get(route + "_s", 0) <= 0 or times.get(other, 0) != 0:
-            raise ValueError("Projection timing does not match the selected route.")
+        all_skipped = drafts == 0 and (
+            policy.get("draft_policy") in {"adaptive", "schedule"}
+            or policy.get("draft_policy_settings", {}).get("latent_draft_min_position", 0) > 0
+        )
+        if all_skipped:
+            if ngrams != 0 or any(times.get(k, 0) != 0 for k in ("t_step_s", "tail_s", "boundary_s")):
+                raise ValueError("Zero draft count conflicts with recorded drafting work.")
+        else:
+            neural_time = sum(times.get(key, 0) for key in ("t_step_s", "t_init_s", "t_sync_s"))
+            parallel_time = times.get("draft_parallel_s", 0) if args.get("single_gpu_parallel_draft") else 0
+            if drafts <= 0 or ngrams != 0 or neural_time + parallel_time <= 0:
+                raise ValueError("No evidence that recurrent drafting actually ran.")
+            if times.get(route + "_s", 0) + parallel_time <= 0 or times.get(other, 0) != 0:
+                raise ValueError("Projection timing does not match the selected route.")
     correction = audit_correction_mode(s, rows, correction_mode) if correction_mode is not None else {}
-    return {**correction, "route": route, "samples": samples, "result_sha256": sha256(path),
+    return {**correction, **policy, "route": route, "samples": samples, "result_sha256": sha256(path),
             "wall_speedup": s["wall_clock_speedup"], "target_call_speedup": s["target_call_speedup"],
             "baseline_correct": sum(r["baseline_correct"] is True for r in rows),
             "recurrent_correct": sum(r["correct"] is True for r in rows),

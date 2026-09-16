@@ -21,6 +21,18 @@ THINKING="${THINKING:-0}"                      # 0 / 1
 DRY_RUN="${DRY_RUN:-0}"                        # 1 只预检
 PYTHON="${PYTHON:-}"                           # 留空优先使用 .venv/bin/python
 CORRECTION_MODE="${CORRECTION_MODE:-off}"       # off / reuse / defer
+DRAFT_POLICY="${DRAFT_POLICY:-fixed}"           # fixed / schedule / adaptive
+SHORT_BLOCK="${SHORT_BLOCK:-$BLOCK}"          # 各段总块上限，含 1 枚已确定 token
+MEDIUM_BLOCK="${MEDIUM_BLOCK:-$BLOCK}"
+LONG_BLOCK="${LONG_BLOCK:-$BLOCK}"
+MEDIUM_POSITION="${MEDIUM_POSITION:-96}"       # 已生成 token 位置，不含 prompt
+LONG_POSITION="${LONG_POSITION:-192}"
+RUNTIME_MODE="${RUNTIME_MODE:-diagnostic}"     # diagnostic / throughput
+TARGET_SKIP_MARGIN="${TARGET_SKIP_MARGIN:-1.0}"
+TARGET_SHORT_MARGIN="${TARGET_SHORT_MARGIN:-3.0}"
+DRAFT_MIN_MARGIN="${DRAFT_MIN_MARGIN:-1.0}"
+COOLDOWN_FAILURES="${COOLDOWN_FAILURES:-3}"
+COOLDOWN_CYCLES="${COOLDOWN_CYCLES:-4}"
 OUT="${OUT:-}"                                # 留空自动生成；须是新目录
 # ==================================================
 
@@ -34,6 +46,7 @@ usage() {
   MODEL=/path/to/base CHECKPOINT=/path/to/checkpoint GPU=GPU-xxx \
     SAMPLES=128 REPEATS=2 bash scripts/benchmark_decode.sh
 
+自适应门控及阈值说明见 scripts/benchmark_decode_adaptive.sh --help。
 auto 根据 boundary_head_rank 选路；头部配置存在不等于已经充分训练。
 core / multistep 权重用 tail，完成 boundary 训练后可用 boundary。
 需要已有模型、checkpoint 和评测 JSONL；本脚本不下载资产。
@@ -69,6 +82,8 @@ fi
 case "$ROUTE" in auto|tail|boundary) ;; *) fail 'ROUTE 必须是 auto、tail 或 boundary。' ;; esac
 case "$DTYPE" in bf16|fp16|fp32) ;; *) fail 'DTYPE 必须是 bf16、fp16 或 fp32。' ;; esac
 case "$CORRECTION_MODE" in off|reuse|defer) ;; *) fail 'CORRECTION_MODE 必须是 off、reuse 或 defer。' ;; esac
+case "$DRAFT_POLICY" in fixed|schedule|adaptive) ;; *) fail 'DRAFT_POLICY 必须是 fixed、schedule 或 adaptive。' ;; esac
+case "$RUNTIME_MODE" in diagnostic|throughput) ;; *) fail 'RUNTIME_MODE 必须是 diagnostic 或 throughput。' ;; esac
 for name in SAMPLES MAX_NEW_TOKENS MAX_PROMPT_TOKENS BLOCK REPEATS; do
   [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || fail "$name 必须是正整数。"
 done
@@ -108,7 +123,7 @@ OUT="${OUT:-$REPO_ROOT/runs/timing_${ROUTE}_$(date +%Y%m%d_%H%M%S)_$$}"
 printf 'Python: %s\nGPU: %s\nRoute: %s\nSamples: %s\n输出目录: %s\n' \
   "$PYTHON" "$GPU" "$ROUTE" "$SAMPLES" "$OUT"
 
-printf 'Correction mode: %s\n' "$CORRECTION_MODE"
+printf 'Correction mode: %s\nDraft policy: %s\n' "$CORRECTION_MODE" "$DRAFT_POLICY"
 
 for ((repeat = 1; repeat <= REPEATS; repeat++)); do
   run_dir="$OUT/repeat$repeat"
@@ -117,7 +132,15 @@ for ((repeat = 1; repeat <= REPEATS; repeat++)); do
     --output "$run_dir" --gpu "$GPU" --route "$ROUTE"
     --samples "$SAMPLES" --start "$START"
     --max-new-tokens "$MAX_NEW_TOKENS" --max-prompt-tokens "$MAX_PROMPT_TOKENS"
-    --block "$BLOCK" --dtype "$DTYPE" --correction-mode "$CORRECTION_MODE")
+    --block "$BLOCK" --dtype "$DTYPE" --correction-mode "$CORRECTION_MODE"
+    --draft-policy "$DRAFT_POLICY" --runtime-mode "$RUNTIME_MODE"
+    --short-block "$SHORT_BLOCK" --medium-block "$MEDIUM_BLOCK" --long-block "$LONG_BLOCK"
+    --medium-position "$MEDIUM_POSITION" --long-position "$LONG_POSITION")
+  if [[ "$DRAFT_POLICY" == adaptive ]]; then
+    cmd+=(--target-skip-margin "$TARGET_SKIP_MARGIN" --target-short-margin "$TARGET_SHORT_MARGIN"
+      --draft-min-margin "$DRAFT_MIN_MARGIN" --cooldown-failures "$COOLDOWN_FAILURES"
+      --cooldown-cycles "$COOLDOWN_CYCLES")
+  fi
   if [[ "$THINKING" == 1 ]]; then cmd+=(--thinking); fi
   if [[ "$DRY_RUN" == 1 ]]; then cmd+=(--dry-run); fi
   printf '\n第 %s/%s 次；日志：%s/run.log\n' "$repeat" "$REPEATS" "$run_dir"
@@ -142,6 +165,9 @@ fields = [
     ("samples", "题数"),
     ("baseline_time_s", "Greedy 总耗时（秒）"),
     ("adaptive_time_s", "投机总耗时（秒）"),
+    ("baseline_decode_only_time_s", "Greedy 解码耗时（不含 prefill）"),
+    ("adaptive_decode_only_time_s", "投机解码耗时（不含 prefill，含 T 初始化）"),
+    ("decode_only_wall_speedup", "解码耗时加速比"),
     ("wall_clock_speedup", "耗时加速比（大于 1 才加速）"),
     ("baseline_tokens_per_s", "Greedy tokens/s"),
     ("adaptive_tokens_per_s", "投机 tokens/s"),
@@ -159,13 +185,38 @@ fields = [
     ("fast_correction_cache_reuses", "验证缓存复用次数"),
     ("deferred_corrective_tokens", "延迟纠正次数"),
 ]
-lines = ["测速结果", f"纠正模式: {marker.get('correction_mode', 'off')}"]
+lines = ["测速结果", f"纠正模式: {marker.get('correction_mode', 'off')}",
+         f"草稿策略: {marker.get('draft_policy', 'fixed')}"]
 if marker.get("correction_mode", "off") != "off" and not marker.get("correction_optimization_observed"):
     lines.append("优化开关已开启，但本次未触发对应纠正分支；不能据此判断优化收益。")
 for key, label in fields:
     value = s.get(key)
     value = f"{value:.6f}" if isinstance(value, float) else str(value)
     lines.append(f"{label}: {value}")
+if "draft_policy" in marker:
+    for key, label in (
+        ("draft_policy_settings", "实际草稿策略参数"),
+        ("verified_blocks", "已记录验证块数（不含直接终止的 EOS 轮）"),
+        ("draft_blocks", "尝试过草稿的块数"),
+        ("target_only_blocks", "无草稿块数（含门控、冷却及生成长度限制）"),
+        ("target_only_block_rate", "无草稿块比例（0～1）"),
+        ("mean_drafts_per_draft_block", "每个草稿块平均尝试草稿数"),
+        ("mean_accepted_drafts_per_draft_block", "每个草稿块平均接受草稿数（不含已确定 token）"),
+        ("mean_accepted_drafts_per_block", "每个验证块平均接受草稿数"),
+        ("cheap_policy_evaluations", "目标置信度门控判断次数"),
+        ("cheap_policy_skips", "目标置信度门控跳过次数"),
+        ("draft_cooldown_skips", "失败冷却跳过次数"),
+        ("draft_cooldown_activations", "失败冷却触发次数"),
+        ("draft_block_histogram", "块长度分布（长度含已确定 token）"),
+    ):
+        value = marker[key]
+        value = f"{value:.6f}" if isinstance(value, float) else str(value)
+        lines.append(f"{label}: {value}")
+    lines.append("门控与冷却跳过次数可能重叠，不能相加作为总跳过次数。")
+    if not marker["recurrent_drafting_observed"]:
+        lines.append("本次没有尝试草稿；检查门控阈值及生成长度，不能据此评估 T 的草稿质量。")
+for phase, values in marker.get("phase_draft_stats", {}).items():
+    lines.append(f"位置分段 {phase}（按块起始位置统计）: {values}")
 lines.append(f"GPU 观察状态: {marker.get('timing_status', '未知')}")
 if s.get("component_timing_mode") == "host_enqueue":
     lines.append("分项是主机提交耗时，不能据此判断 GPU 各环节占比。")
