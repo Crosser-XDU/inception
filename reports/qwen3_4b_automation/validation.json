@@ -24,5 +24,55 @@
     "Local A42 remains queued for an idle GPU; no long-training updates have run.",
     "The remote entry point prepares eight workers; initial checkpoint dependencies leave three workers waiting.",
     "Model weights, datasets, remote host address and SSH credentials are external inputs."
-  ]
+  ],
+  "direct_platform_shell": {
+    "script": "scripts/train/qwen3-4b/run8_qwen3_4b.sh",
+    "syntax": "passed",
+    "conda_activation_and_shared_asset_preparation": "passed",
+    "eight_parallel_dry_run_commands": "passed",
+    "assignments": [
+      {
+        "experiment": "full_joint/seed_42",
+        "gpu": "1",
+        "dependency": null
+      },
+      {
+        "experiment": "full_joint/seed_43",
+        "gpu": "4",
+        "dependency": null
+      },
+      {
+        "experiment": "full_joint/seed_44",
+        "gpu": "7",
+        "dependency": null
+      },
+      {
+        "experiment": "no_joint/seed_43",
+        "gpu": "2",
+        "dependency": null
+      },
+      {
+        "experiment": "no_joint/seed_44",
+        "gpu": "5",
+        "dependency": null
+      },
+      {
+        "experiment": "post_joint/seed_42",
+        "gpu": "0",
+        "dependency": "no_joint/seed_42"
+      },
+      {
+        "experiment": "post_joint/seed_43",
+        "gpu": "3",
+        "dependency": "no_joint/seed_43"
+      },
+      {
+        "experiment": "post_joint/seed_44",
+        "gpu": "6",
+        "dependency": "no_joint/seed_44"
+      }
+    ],
+    "prepared_suite": "runs/qwen3_4b_remote8_20260918",
+    "long_training_executions": 0
+  }
 }

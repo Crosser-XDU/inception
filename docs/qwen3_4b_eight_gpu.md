@@ -2,6 +2,20 @@
 
 本机保留 **A `no_joint/seed_42`**。远端一次提交八个独立单卡进程，不使用 DDP；训练配方、三 seed、A/B 同 seed 共享 checkpoint 和配对 greedy 协议保持不变。
 
+## 当前平台直接提交的脚本
+
+与 `Exploration-my/scripts/train/qwem2.5-1.5b/run4_ppo5.sh` 相同形式的入口是：
+
+```bash
+bash /mnt/llmshared-ssd-hd/wangruitao/inception-qwen3-4b/scripts/train/qwen3-4b/run8_qwen3_4b.sh
+```
+
+这个 `.sh` 已写好 conda 环境、模型/数据和输出目录，显式启动八个后台任务，分别设置 `CUDA_VISIBLE_DEVICES`、写独立日志，最后逐个 `wait` 并报告失败。无需额外的 `.env` 文件。默认 GPU 0–7；平台提供八个可见设备时沿用分配顺序。
+
+该入口针对挂载同一共享盘的八卡自动化任务，本机 A42 的 checkpoint 直接从共享盘读取，不需要 SSH 传输。主日志位于 `inception-qwen3-4b/logs/qwen3_4b_remote8_<时间>_<PID>/`，实验位于 `runs/qwen3_4b_remote8_20260918`。附加 `--dry-run` 可在当前机器检查全部八条启动命令，不启动训练。
+
+下文的配置文件和 SSH 入口用于路径不同或不共享文件系统的其他主机。
+
 ## 任务分配
 
 默认远端物理 GPU 编号如下，可通过 `GPUS` 调整顺序：
