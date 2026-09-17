@@ -58,6 +58,8 @@ MetaMath 按规范化 query 分组，以固定 salt 的哈希选择 512 个验�
 
 ## 准备与运行
 
+本机保留 `no_joint/seed_42`、其余八组在一台八卡 Linux 主机运行时，使用 [八卡自动化入口与 checkpoint 交接说明](qwen3_4b_eight_gpu.md)。它采用每实验一个 worker；下文原入口采用每 seed 一个 worker。
+
 使用已经安装依赖的 inception Python 环境。准备脚本只生成数据划分、18 份阶段配置、9 个实验计划及源代码快照，不启动长训练：
 
 ```bash
